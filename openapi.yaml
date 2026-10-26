@@ -1,0 +1,321 @@
+openapi: 3.0.3
+info:
+  title: DDO Queue API
+  version: 1.0.0
+  description: |
+    Sıra yönetim sistemi API'sinin temel uç noktaları.
+
+    Tüm yanıtlar `X-DDO-Mark` başlığını taşır. Hatalar `{"error": "<mesaj>"}`
+    biçiminde döner. İstek gövdeleri en fazla 1 MiB olabilir ve bilinmeyen
+    alanlar reddedilir (400).
+servers:
+  - url: http://localhost:8080
+    description: Yerel geliştirme
+
+tags:
+  - name: health
+    description: Servis sağlık kontrolü
+  - name: auth
+    description: Kimlik doğrulama ve oturum
+  - name: queue
+    description: Şube, hizmet ve gişe yönetimi
+
+paths:
+  /health:
+    get:
+      tags: [health]
+      summary: Canlılık kontrolü
+      description: Veritabanına ping atar. Kimlik doğrulama gerektirmez.
+      operationId: getHealth
+      security: []
+      responses:
+        '200':
+          description: Servis ve veritabanı erişilebilir
+          headers:
+            X-DDO-Mark:
+              $ref: '#/components/headers/XDDOMark'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+              example:
+                status: ok
+        '503':
+          description: Veritabanına ulaşılamıyor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+              example:
+                status: unavailable
+
+  /api/auth/login:
+    post:
+      tags: [auth]
+      summary: E-posta ve parolayla giriş
+      description: |
+        Başarılı girişte erişim (JWT) ve yenileme token'ı döner. Bilinmeyen
+        e-posta, yanlış parola ve aktif olmayan hesap için yanıt aynıdır (401).
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              email: admin@example.com
+              password: correct-horse-battery
+      responses:
+        '200':
+          description: Giriş başarılı
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          description: Geçersiz JSON gövdesi
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: invalid JSON body
+        '401':
+          description: Geçersiz kimlik bilgileri
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: invalid credentials
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/auth/me:
+    get:
+      tags: [auth]
+      summary: Oturumdaki kullanıcı ve izinleri
+      description: '`profile:read` izni gerekir (tüm roller bu izne sahiptir).'
+      operationId: getMe
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Kullanıcı bilgisi ve rolüne ait izinler
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MeResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/queue/branches:
+    get:
+      tags: [queue]
+      summary: Şubeleri listele
+      description: |
+        Giriş yapmış her kullanıcı erişebilir. `queue:manage` iznine sahip
+        olanlar (admin) pasif şubeleri de görür; diğerleri yalnızca aktif
+        şubeleri görür. Sonuçlar `code` alanına göre sıralıdır.
+      operationId: listBranches
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Şube listesi
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BranchList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  headers:
+    XDDOMark:
+      description: Her yanıta eklenen işaret başlığı
+      schema:
+        type: string
+        example: bfe1f2
+
+  responses:
+    Unauthorized:
+      description: Bearer token eksik, geçersiz veya süresi dolmuş
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            missing:
+              value:
+                error: missing bearer token
+            invalid:
+              value:
+                error: invalid or expired token
+    Forbidden:
+      description: Rolün gerekli izni yok
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: forbidden
+    InternalError:
+      description: Sunucu hatası
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: internal error
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    HealthStatus:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, unavailable]
+
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        password:
+          type: string
+          format: password
+          description: En fazla 128 bayt; daha uzunu doğrudan 401 alır.
+
+    TokenResponse:
+      type: object
+      required: [access_token, token_type, expires_in, refresh_token, user]
+      properties:
+        access_token:
+          type: string
+          description: JWT erişim token'ı
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_in:
+          type: integer
+          format: int64
+          description: Erişim token'ının kalan ömrü (saniye)
+        refresh_token:
+          type: string
+          description: Opak yenileme token'ı (/api/auth/refresh için)
+        user:
+          $ref: '#/components/schemas/User'
+
+    MeResponse:
+      type: object
+      required: [user, permissions]
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        permissions:
+          type: array
+          description: Sırası garanti edilmez.
+          items:
+            $ref: '#/components/schemas/Permission'
+
+    User:
+      type: object
+      required: [id, email, full_name, role, status, email_verified_at, last_login_at, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        full_name:
+          type: string
+          maxLength: 200
+        role:
+          $ref: '#/components/schemas/Role'
+        status:
+          type: string
+          example: active
+        email_verified_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_login_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    Role:
+      type: string
+      enum: [admin, staff, display, user]
+
+    Permission:
+      type: string
+      enum:
+        - profile:read
+        - users:read
+        - users:write
+        - audit:read
+        - tickets:create
+        - appointments:create
+        - queue:read
+        - queue:call
+        - queue:manage
+
+    BranchList:
+      type: object
+      required: [branches]
+      properties:
+        branches:
+          type: array
+          items:
+            $ref: '#/components/schemas/Branch'
+
+    Branch:
+      type: object
+      required: [id, code, name, is_active, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+          example: IST-01
+        name:
+          type: string
+          example: İstanbul Merkez
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time

@@ -1,0 +1,94 @@
+name: ddo
+
+# Start order is driven by healthchecks, not just container start:
+#   postgres (pg_isready) → api (/health) → frontend (nginx) and simulator.
+# `docker compose up -d --wait` returns only once every service is healthy.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: qa-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-qa}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-qa_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-qa}
+      TZ: UTC
+      PGTZ: UTC
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - qa-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  api:
+    build:
+      context: ./backend
+      target: runtime
+    image: ddo/api:local
+    container_name: ddo-zeytin-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # POSTGRES_PASSWORD must be URL-safe here (or percent-encoded).
+      DATABASE_URL: postgres://${POSTGRES_USER:-qa}:${POSTGRES_PASSWORD:-qa_secret}@postgres:5432/${POSTGRES_DB:-qa}?sslmode=disable
+      HTTP_ADDR: ":8080"
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env (at least 32 bytes)}
+      JWT_ISSUER: ${JWT_ISSUER:-qa-backend}
+      ACCESS_TOKEN_TTL: ${ACCESS_TOKEN_TTL:-15m}
+      REFRESH_TOKEN_TTL: ${REFRESH_TOKEN_TTL:-720h}
+      QUEUE_TIMEZONE: ${QUEUE_TIMEZONE:-Europe/Istanbul}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-localhost:3000,localhost:5173,127.0.0.1:3000}
+      EVENT_RETENTION: ${EVENT_RETENTION:-48h}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-seed.dalga@ddo-case.invalid}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env (creates the first seed user)}
+    ports:
+      - "${API_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "/app/api", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      target: runtime
+    image: ddo/frontend:local
+    container_name: ddo-zeytin-web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-3000}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # On-demand tools: `docker compose --profile tools run --rm simulator <seed|run|verify>`
+  simulator:
+    profiles: ["tools"]
+    build:
+      context: ./simulator
+      target: runtime
+    image: ddo/simulator:local
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      SIM_API_URL: http://api:8080
+      SIM_ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+
+volumes:
+  qa-pgdata:
